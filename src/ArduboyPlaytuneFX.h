@@ -49,6 +49,7 @@
 
 #include <Arduino.h>
 #include <avr/pgmspace.h>
+#include <ArduboyFX.h>
 
 #define AVAILABLE_TIMERS  2
 
@@ -58,11 +59,14 @@
 #define TUNE_OP_RESTART   0xe0  /* restart the score from the beginning */
 #define TUNE_OP_STOP      0xf0  /* stop playing */
 
+#define TUNE_MODE_NORMAL  0
+#define TUNE_MODE_FX      1
+
 /** \brief
  * The ArduboyPlaytune class for playing two part musical scores and
  * sounding tones.
  */
-class ArduboyPlaytune
+class ArduboyPlaytuneFX
 {
 public:
   /** \brief
@@ -89,7 +93,17 @@ public:
    * If using the Arduboy2 library, `audio.enabled()` is appropriate
    * to use as the mute function.
    */
-  ArduboyPlaytune(boolean (*outEn)());
+  ArduboyPlaytuneFX(boolean (*outEn)());
+
+  ArduboyPlaytuneFX(bool (*outEn)(), uint8_t *buffer, uint8_t bufferLen);
+
+  template<size_t size>
+  ArduboyPlaytuneFX(boolean (*enabled)(), uint8_t (&buffer)[size]) :
+    ArduboyPlaytuneFX(enabled, buffer, size)
+  {
+    static_assert(size < 256, "Buffer too large");
+  }
+
 
   /** \brief
    * Assign an output pin to a score channel.
@@ -129,6 +143,8 @@ public:
    *  have been initialized will be ignored.
    */
   void playScore(const byte *score);
+
+  void playScoreFromFX(uint24_t score, uint24_t scoreLen);
 
   /** \brief
    * Stop playing a score started using `playScore()`.
@@ -184,6 +200,8 @@ public:
    * \endparblock
    */
   void toneMutesScore(boolean mute);
+
+  void fillBufferFromFX();
 
 private:
   void static playNote(byte chan, byte note);

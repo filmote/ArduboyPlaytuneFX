@@ -59,7 +59,7 @@ prevents a "stuttering" playback because of timing errors:
         ok with the 2013 version that used the 8-bit timer for score waits.
 */
 
-#include "ArduboyPlaytune.h"
+#include "ArduboyPlaytuneFX.h"
 #include <avr/power.h>
 
 static const byte tune_pin_to_timer[] = { 3, 1 };
@@ -106,12 +106,30 @@ const unsigned int _midi_word_note_frequencies[80] PROGMEM = {
 22351,23680,25088
 };
 
-ArduboyPlaytune::ArduboyPlaytune(boolean (*outEn)())
+static volatile uint24_t tunesMemFX_Start;
+static volatile uint24_t tunesMemFX_Index;
+static volatile uint24_t tunesMemFX_Len;
+
+static volatile uint8_t *tunesBufferFX;
+static uint8_t tunesBufferFX_Len;
+static uint8_t tunesBufferFX_Head;
+static int8_t tunesBufferFX_Tail;
+static volatile uint8_t tuneMode;
+
+ArduboyPlaytuneFX::ArduboyPlaytuneFX(boolean (*outEn)())
 {
   outputEnabled = outEn;
 }
 
-void ArduboyPlaytune::initChannel(byte pin)
+ArduboyPlaytuneFX::ArduboyPlaytuneFX(boolean (*outEn)(), uint8_t *buffer, uint8_t bufferLen)
+{
+  outputEnabled = outEn;
+  tunesBufferFX = buffer;
+  tunesBufferFX_Len = bufferLen;
+  outputEnabled = outEn;
+}
+
+void ArduboyPlaytuneFX::initChannel(byte pin)
 {
   byte timer_num;
   byte pin_port;
@@ -159,7 +177,7 @@ void ArduboyPlaytune::initChannel(byte pin)
   }
 }
 
-void ArduboyPlaytune::playNote(byte chan, byte note)
+void ArduboyPlaytuneFX::playNote(byte chan, byte note)
 {
   byte timer_num;
   byte prescalar_bits;
@@ -217,7 +235,7 @@ void ArduboyPlaytune::playNote(byte chan, byte note)
   }
 }
 
-void ArduboyPlaytune::stopNote(byte chan)
+void ArduboyPlaytuneFX::stopNote(byte chan)
 {
   byte timer_num;
   timer_num = tune_pin_to_timer[chan];
@@ -237,22 +255,37 @@ void ArduboyPlaytune::stopNote(byte chan)
   }
 }
 
-void ArduboyPlaytune::playScore(const byte *score)
+void ArduboyPlaytuneFX::playScore(const byte *score)
 {
+  tuneMode = TUNE_MODE_NORMAL;
   score_start = score;
   score_cursor = score_start;
   step();  /* execute initial commands */
   tune_playing = true;  /* release the interrupt routine */
 }
 
-void ArduboyPlaytune::stopScore()
+void ArduboyPlaytuneFX::playScoreFromFX(uint24_t score, uint24_t scoreLen)
+{
+  tunesMemFX_Start = tunesMemFX_Index = score; // set to start of sequence array
+  tunesMemFX_Len = scoreLen;
+  tuneMode = TUNE_MODE_FX;
+  tunesBufferFX_Head = 0;
+  tunesBufferFX_Tail = -1;
+
+  tune_playing = true;  /* release the interrupt routine */
+  fillBufferFromFX();
+
+  step();  /* execute initial commands */
+}
+
+void ArduboyPlaytuneFX::stopScore()
 {
   for (uint8_t i = 0; i < _tune_num_chans; i++)
     stopNote(i);
   tune_playing = false;
 }
 
-boolean ArduboyPlaytune::playing()
+boolean ArduboyPlaytuneFX::playing()
 {
   return tune_playing;
 }
@@ -264,13 +297,22 @@ from the interrupt routine when waits expire.
 If CMD < 0x80, then the other 7 bits and the next byte are a
 15-bit big-endian number of msec to wait
 */
-void ArduboyPlaytune::step()
+void ArduboyPlaytuneFX::step()
 {
   byte command, opcode, chan;
   unsigned duration;
 
   while (1) {
-    command = pgm_read_byte(score_cursor++);
+
+    if (tuneMode == TUNE_MODE_NORMAL) {
+      command = pgm_read_byte(score_cursor++);
+    }
+    else {
+      command = tunesBufferFX[tunesBufferFX_Tail];
+      tunesBufferFX_Tail++;
+      tunesBufferFX_Tail = tunesBufferFX_Tail % tunesBufferFX_Len;
+    }
+
     opcode = command & 0xf0;
     chan = command & 0x0f;
     if (opcode == TUNE_OP_STOPNOTE) { /* stop note */
@@ -278,10 +320,25 @@ void ArduboyPlaytune::step()
     }
     else if (opcode == TUNE_OP_PLAYNOTE) { /* play note */
       all_muted = !outputEnabled();
-      playNote(chan, pgm_read_byte(score_cursor++));
+      if (tuneMode == TUNE_MODE_NORMAL) {
+        playNote(chan, pgm_read_byte(score_cursor++));
+      }
+      else {
+        uint8_t note = tunesBufferFX[tunesBufferFX_Tail];
+        tunesBufferFX_Tail++;
+        tunesBufferFX_Tail = tunesBufferFX_Tail % tunesBufferFX_Len;
+        playNote(chan, note);
+      }
     }
     else if (opcode < 0x80) { /* wait count in msec. */
-      duration = ((unsigned)command << 8) | (pgm_read_byte(score_cursor++));
+      if (tuneMode == TUNE_MODE_NORMAL) {
+        duration = ((unsigned)command << 8) | (pgm_read_byte(score_cursor++));
+      }
+      else {
+        duration = ((unsigned)command << 8) | tunesBufferFX[tunesBufferFX_Tail];
+        tunesBufferFX_Tail++;
+        tunesBufferFX_Tail = tunesBufferFX_Tail % tunesBufferFX_Len;
+      }
       wait_toggle_count = ((unsigned long) wait_timer_frequency2 * duration + 500) / 1000;
       if (wait_toggle_count == 0) wait_toggle_count = 1;
       break;
@@ -296,7 +353,7 @@ void ArduboyPlaytune::step()
   }
 }
 
-void ArduboyPlaytune::closeChannels()
+void ArduboyPlaytuneFX::closeChannels()
 {
   byte timer_num;
   for (uint8_t chan=0; chan < _tune_num_chans; chan++) {
@@ -316,7 +373,7 @@ void ArduboyPlaytune::closeChannels()
   tune_playing = tone_playing = tone_only = mute_score = false;
 }
 
-void ArduboyPlaytune::tone(unsigned int frequency, unsigned long duration)
+void ArduboyPlaytuneFX::tone(unsigned int frequency, unsigned long duration)
 {
   // don't output the tone if sound is muted or
   // the tone channel isn't initialised
@@ -355,9 +412,42 @@ void ArduboyPlaytune::tone(unsigned int frequency, unsigned long duration)
   bitWrite(TIMSK1, OCIE1A, 1);
 }
 
-void ArduboyPlaytune::toneMutesScore(boolean mute)
+void ArduboyPlaytuneFX::toneMutesScore(boolean mute)
 {
   tone_mutes_score = mute;
+}
+
+
+void ArduboyPlaytuneFX::fillBufferFromFX()
+{
+    if (tune_playing && tunesBufferFX_Head != tunesBufferFX_Tail) {
+
+      uint8_t head = tunesBufferFX_Head;
+
+      FX::seekData(tunesMemFX_Index);
+
+      while ((head % tunesBufferFX_Len) != tunesBufferFX_Tail) {
+
+        uint8_t t = FX::readPendingUInt8();
+        tunesBufferFX[head % tunesBufferFX_Len] = t;
+        head++;
+        tunesMemFX_Index++;
+
+        if (tunesMemFX_Index == tunesMemFX_Len && t == 0xE0) { // Repeat
+          tunesMemFX_Index = tunesMemFX_Start;
+          FX::readEnd();
+          FX::seekData(tunesMemFX_Index);
+        }
+
+        if (tunesBufferFX_Tail == -1) tunesBufferFX_Tail = 0;
+
+      }
+
+      tunesBufferFX_Head = head % tunesBufferFX_Len;
+      FX::readEnd();
+
+    }
+
 }
 
 // ===== Interrupt service routines =====
@@ -397,7 +487,7 @@ ISR(TIMER3_COMPA_vect)
 
   if (tune_playing && wait_toggle_count && --wait_toggle_count == 0) {
     // end of a score wait, so execute more score commands
-    ArduboyPlaytune::step();  // execute commands
+    ArduboyPlaytuneFX::step();  // execute commands
   }
 }
 
