@@ -107,7 +107,7 @@ const unsigned int _midi_word_note_frequencies[80] PROGMEM = {
 };
 
 static volatile uint24_t tunesMemFX_Start;
-static volatile uint24_t tunesMemFX_Index;
+static volatile uint24_t tunesMemFX_Curr;
 static volatile uint24_t tunesMemFX_Len;
 
 static volatile uint8_t *tunesBufferFX;
@@ -266,7 +266,7 @@ void ArduboyPlaytuneFX::playScore(const byte *score)
 
 void ArduboyPlaytuneFX::playScoreFromFX(uint24_t score, uint24_t scoreLen)
 {
-  tunesMemFX_Start = tunesMemFX_Index = score; // set to start of sequence array
+  tunesMemFX_Start = tunesMemFX_Curr = score; // set to start of sequence array
   tunesMemFX_Len = scoreLen;
   tuneMode = TUNE_MODE_FX;
   tunesBufferFX_Head = 0;
@@ -424,19 +424,19 @@ void ArduboyPlaytuneFX::fillBufferFromFX()
 
       uint8_t head = tunesBufferFX_Head;
 
-      FX::seekData(tunesMemFX_Index);
+      FX::seekData(tunesMemFX_Curr);
 
       while ((head % tunesBufferFX_Len) != tunesBufferFX_Tail) {
 
         uint8_t t = FX::readPendingUInt8();
         tunesBufferFX[head % tunesBufferFX_Len] = t;
         head++;
-        tunesMemFX_Index++;
+        tunesMemFX_Curr++;
 
-        if (tunesMemFX_Index == tunesMemFX_Len && t == 0xE0) { // Repeat
-          tunesMemFX_Index = tunesMemFX_Start;
+        if ((tunesMemFX_Curr == tunesMemFX_Start + tunesMemFX_Len) && (t == 0xE0)) { // Repeat
+          tunesMemFX_Curr = tunesMemFX_Start;
           FX::readEnd();
-          FX::seekData(tunesMemFX_Index);
+          FX::seekData(tunesMemFX_Curr);
         }
 
         if (tunesBufferFX_Tail == -1) tunesBufferFX_Tail = 0;
